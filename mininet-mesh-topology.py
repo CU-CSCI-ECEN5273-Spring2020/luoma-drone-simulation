@@ -22,7 +22,9 @@ class ChainTopo(Topo):
         global numSwitches
         numSwitches = count
 
-        hosts = [self.addHost('h%d' % i) for i in range(1, count + 1)]
+        # as configured, can currently only handle up to 9 hosts due to the way mac is formatted
+        # the ip and mac configuration come from https://mailman.stanford.edu/pipermail/mininet-discuss/2015-October/006525.html
+        hosts = [self.addHost('h%d' % i, ip='192.168.100.%d' % i, mac='00:00:00:00:00:0%d' % i) for i in range(1, count + 1)]
         switches = [self.addSwitch('s%d' % i) for i in range(1, count + 1)]
         for i in range(count):
             self.addLink(hosts[i], switches[i])
@@ -67,6 +69,8 @@ for i in range(0, numSwitches):
 class MultiSwitch(OVSSwitch):
     def start(self, controllers):
         return OVSSwitch.start(self, [cmap[self.name]])
+
+switches = {'multiswitch' : MultiSwitch}
 
 
 if __name__ == '__main__':
