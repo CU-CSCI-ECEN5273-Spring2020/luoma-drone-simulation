@@ -1,7 +1,7 @@
 #!/usr/bin/python
 
 from mininet.cli import CLI
-from mininet.node import Controller, OVSSwitch
+from mininet.node import RemoteController, OVSSwitch
 from mininet.net import Mininet
 from mininet.topo import Topo
 
@@ -34,50 +34,13 @@ class ChainTopo(Topo):
 topos = {'chain': (lambda: ChainTopo())}
 
 
-"""
-########
-Controllers
-########
-"""
-# A simple script to start my custom POX controller
-# TODO change name to custom script
-class POXBridge(Controller):
-    def start(self):
-        self.pox = '%s/pox/pox.py' % os.environ['HOME']
-        self.cmd(self.pox, 'forwarding.l2_learning &')
-
-    def stop( self ):
-        self.cmd('kill %' + self.pox)
-                                                                                                       
-controllers = {'poxbridge': POXBridge}
-
-
-"""
-########
-Switches
-########
-"""
-# modified from https://github.com/mininet/mininet/blob/master/examples/controllers.py
-# Code to enable each switch having its own controller
-defaultControllerPort = 6633
-numSwitches = 3
-controllers = [POXBridge('c%d' % i, port=defaultControllerPort + i) for i in range(0, numSwitches)]
-cmap = {}
-for i in range(0, numSwitches):
-    cmap['s%d' % i+1] = controllers[i]
-
-class MultiSwitch(OVSSwitch):
-    def start(self, controllers):
-        return OVSSwitch.start(self, [cmap[self.name]])
-
-switches = {'multiswitch' : MultiSwitch}
-
-
 if __name__ == '__main__':
-    net = Mininet(topo=ChainTopo(3), switch=MultiSwitch, build=False)
-    for c in controllers:
-        net.addController(c)
+    net = Mininet(topo=ChainTopo(3), controller=RemoteController, build=False)
     net.build()
     net.start()
+    #net.startTerms()
+    for h in net.hosts:
+        h.cmd('arp -s 192.168.1.253 FF:FF:FF:FF:FF:FD')
+        h.cmd('python ./mininet-host-program.py &')
     CLI(net)
     net.stop()
