@@ -40,7 +40,7 @@ if __name__ == '__main__':
     net.start()
     #net.startTerms()
     for h in net.hosts:
-        h.cmd('arp -s 192.168.1.253 FF:FF:FF:FF:FF:FD')
+        h.cmd('arp -s 192.168.1.253 FF:FF:FF:FF:FF:FD') # so hosts can self-announce to their switch
         h.cmd('python ./mininet-host-program.py &')
     CLI(net)
     net.stop()
