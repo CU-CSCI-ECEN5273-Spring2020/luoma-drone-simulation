@@ -22,7 +22,7 @@ def listen_for_routing_updates():
 
     while True:
         message, addr = sock.recvfrom(1024) # buffer size is 1024 bytes
-        print "received message: ", message
+        #print "received message: ", message
         ip_to_mac_dict = json.loads(message)
         # subprocess.call(['ip', '-s', '-s', 'neigh', 'flush', 'all']) # flush the arp cache
         for ip, mac in ip_to_mac_dict.iteritems(): # populate the arp cache with reachable hosts

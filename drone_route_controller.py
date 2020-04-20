@@ -1,4 +1,5 @@
 # Copyright 2012-2013 James McCauley
+# Modified extensively by Jake Luoma for CSCI 5273 Network Systems at CU Boulder Spring 2020
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,16 +14,34 @@
 # limitations under the License.
 
 """
-A stupid L3 switch
+A drone swarm learning switch
 
 For each switch:
-1) Keep a table that maps IP addresses to MAC addresses and switch ports.
-   Stock this table using information from ARP and IP packets.
-2) When you see an ARP query, try to answer it using information in the table
-   from step 1.  If the info in the table is old, just flood the query.
-3) Flood all other ARPs.
-4) When you see an IP packet, if you know the destination port (because it's
+1) Keep a table that maps DPID to connection, connected host, and routing tables.
+   Stock this table using info from hello messages, routing broadcasts, and IP packets.
+   Routing tables map IP addresses to information about that IP address
+   including IP, mac, port, etx, and whether it has access to internet.
+2) Keep a list of host IP addresses with internet access.
+3) When you see a packet destined for an address outside the swarm
+   (192.168.100.xxx is reserved for the swarm), try to forward it to a host
+   with internet access so it can be forwarded appropriately.
+4) If you don't have a route to the destination IP address, store the packet in
+   a temporary buffer. Try to send the packets in the buffer occasionally.
+5) When you see an IP packet, if you know the destination port (because it's
    in the table from step 1), install a flow for it.
+
+Note that each host is mapped 1:1 with a switch. They are considered a connected
+pair. Switches are connected to each other and forward packets. The switches/controller
+are responsible for generating routing information.
+
+Routing tables are shared every 3 seconds. They are flooded out all ports 
+NUM_HELLO_TRANSMISSIONS times to generate ETX information.
+During that three seconds, a switch collects all routing tables received. After the
+3 seconds are over, it consolidates all routing tables received, culls them so only
+the best paths to each known IP address are left, and updates its routing table. This
+means that if a route to an IP address during that 3 seconds of collection is not found and
+it's in a currently existing table, it is removed. This ensures that the network adapts
+in the case of a broken link.
 """
 
 from pox.core import core
@@ -48,13 +67,13 @@ import json
 import time
 
 # Timeout for flows
-FLOW_IDLE_TIMEOUT = 10
+FLOW_IDLE_TIMEOUT = 3
 
-# Maximum number of packet to buffer on a switch for an unknown IP
+# Maximum number of packets to buffer on a switch for an unknown IP
 MAX_BUFFERED_PER_IP = 5
 
 # Maximum time to hang on to a buffer for an unknown IP in seconds
-MAX_BUFFER_TIME = 5
+MAX_BUFFER_TIME = 12
 
 # Number of hello transmissions
 NUM_HELLO_TRANSMISSIONS = 5
@@ -98,6 +117,9 @@ class l3_switch (EventMixin):
     # For each switch, we capture the IP address, MAC address,
     # relevant switch port, and connection for the attached host
     self.dpid_table = {}
+
+    # A global list of host IP addresses with internet access
+    self.hosts_with_internet = []
 
     # This timer handles expiring stuff
     self._expire_timer = Timer(5, self._handle_expiration, recurring=True)
@@ -284,7 +306,12 @@ class l3_switch (EventMixin):
       dstaddr = packet.next.dstip
       if dstaddr == "192.168.1.253":
         log.debug("got hello message from %s" % packet.next.srcip)
-        host_entry = Host_Entry(packet.next.srcip, packet.src, inport, 1.0, "no")
+        if packet.next.srcip == "192.168.100.3":
+          host_entry = Host_Entry(packet.next.srcip, packet.src, inport, 1.0, "yes")
+          self.hosts_with_internet.append(packet.next.srcip)
+          log.debug("%s has internet access" % packet.next.srcip)
+        else:
+          host_entry = Host_Entry(packet.next.srcip, packet.src, inport, 1.0, "no")
         host_entry.received_count = NUM_HELLO_TRANSMISSIONS
         route_table1 = {packet.next.srcip : host_entry}
         route_table2 = {packet.next.srcip : [host_entry]}
@@ -301,7 +328,7 @@ class l3_switch (EventMixin):
         event.connection.send(msg)
 
       # Handle if it's a routing info packet
-      if dstaddr == "192.168.1.254":  # works, but should modify match since flow rule is on ports
+      elif dstaddr == "192.168.1.254":  # works, but should modify match since flow rule is on ports
         payload = packet.payload.payload.payload
         routes = json.loads(payload.decode("utf-8"))
         for route in routes:
@@ -325,8 +352,44 @@ class l3_switch (EventMixin):
             if already_present_on_port == False:
               self.dpid_table[dpid].route_table2[ip].append(Host_Entry(ip, mac, inport, received_etx, internet))
         
+      # handle if it's destined for the internet
+      # note: the swarm's address space is defined to only be within 192.168.100.xxx
+      elif dstaddr.toStr()[:11] != "192.168.100": # must be destined for outside the swarm. Forward to the internet!
+          log.debug("%s Got a packet destined for the internet!" % dpid)
+          
+          # if the switch/host handling this has internet access,
+          # "forward" to the internet by writing the contents to log
+          if self.dpid_table[dpid].connected_host.internet == "yes":
+            log.debug('%s "Sending" packet to internet' % dpid)
+
+          else: # forward in the direction of the nearest host with internet access
+            if len(self.hosts_with_internet) == 0: # no known hosts with internet
+              log.debug("No known hosts with internet access")
+              # Add to tracked buffers
+              if (dpid,dstaddr) not in self.lost_buffers:
+                self.lost_buffers[(dpid,dstaddr)] = []
+              bucket = self.lost_buffers[(dpid,dstaddr)]
+              entry = (time.time() + MAX_BUFFER_TIME,event.ofp.buffer_id,inport)
+              bucket.append(entry)
+              while len(bucket) > MAX_BUFFERED_PER_IP: del bucket[0]
+
+            # there's at least one host with internet. send to the one with lowest etx.  
+            closest_ip = self.hosts_with_internet[0]
+            closest_etx = self.dpid_table[dpid].route_table1[closest_ip].etx
+            for host_ip in self.hosts_with_internet:
+              etx = self.dpid_table[dpid].route_table1[host_ip].etx
+              if etx < closest_etx:
+                closest_etx = etx
+                closest_ip = host_ip
+
+            log.debug("%s forwarding packet directed to internet!" % dpid)
+            # now send the packet
+            prt = self.dpid_table[dpid].route_table1[closest_ip].port
+            msg = of.ofp_packet_out(data=packet, action=of.ofp_action_output(port=prt))
+            event.connection.send(msg)
+
       # Try to forward
-      if dstaddr in self.dpid_table[dpid].route_table1.keys():
+      elif dstaddr in self.dpid_table[dpid].route_table1.keys():
         # We have info about what port to send it out on...
 
         prt = self.dpid_table[dpid].route_table1[dstaddr].port
